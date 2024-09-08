@@ -6,7 +6,7 @@ import time
 def send_data(data):
     try:
         # Define the server's IP address and port
-        SERVER_IP = '192.168.1.192'  # Replace with your actual server IP
+        SERVER_IP = '-----'  # Replace with your actual server IP
         SERVER_PORT = 12345          # Replace with your actual server port
 
         # Create a socket object for each object send attempt
