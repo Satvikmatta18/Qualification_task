@@ -1,69 +1,213 @@
-#pragma once
+#include "TCPServer.h"
+#include "Sockets.h"
+#include "SocketSubsystem.h"
+#include "Networking.h"
 
-#include "CoreMinimal.h"
-#include "GameFramework/Actor.h"
-#include "ObjectManager.h"
-#include "TCPServer.generated.h"
+DEFINE_LOG_CATEGORY(LogServer);
 
-// Declare a log category for the server
-DECLARE_LOG_CATEGORY_EXTERN(LogServer, Log, All);
-
-UCLASS()
-class UNREAL_5_2_FEATURE_API ATCPServer : public AActor
+ATCPServer::ATCPServer()
 {
-	GENERATED_BODY()
+    PrimaryActorTick.bCanEverTick = true;
+}
 
-public:
-	// Constructor
-	ATCPServer();
+void ATCPServer::BeginPlay()
+{
+    Super::BeginPlay();
+    StartTCPListener();
+    ObjectManager = NewObject<UObjectManager>();
 
-	// Main function to be called for TCP logic
-	void Main();
+    UWorld* World = GetWorld();
+    ObjectManager->InitializeWorld(World);
+}
 
-protected:
-	// Called when the game starts or when spawned
-	virtual void BeginPlay() override;
+void ATCPServer::Tick(float DeltaTime)
+{
+    Super::Tick(DeltaTime);
+    Main();
+}
 
-	// Called when the game ends
-	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+FString ATCPServer::ParseAndDispatch(FString& Message) {
+    FString result;
 
-public:
-	// Called every frame
-	virtual void Tick(float DeltaTime) override;
+    TSharedPtr<FJsonObject> JsonObject;
+    TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Message);
 
-private:
-	// Socket subsystem for managing sockets
-	ISocketSubsystem* SocketSubsystem;
+    if (FJsonSerializer::Deserialize(Reader, JsonObject) && JsonObject.IsValid())
+    {
+        FString Action;
+        if (JsonObject->TryGetStringField(TEXT("action"), Action)) {
+            if (Action == TEXT("add_object")) {
+                result = ObjectManager->AddObject(JsonObject);
+            }
+        }
+    }
+    return result;
+}
 
-	// Server and client socket
-	FSocket* ServerSocket;
-	FSocket* ClientSocket;
+void ATCPServer::Main()
+{
+    if (!ClientSocket) {
+        CheckForConnections();
+    }
+    else {
+        if (ClientSocket->GetConnectionState() == SCS_Connected)
+        {
+            FString ReceivedMessage = ReceiveData();
+            UE_LOG(LogServer, Log, TEXT("%s"), *ReceivedMessage);
 
-	// Port for the TCP listener
-	int32 port = 12345;
+            if (!ReceivedMessage.IsEmpty()) {
+                FString result = ParseAndDispatch(ReceivedMessage);
+                SendBackToClient(result);
+            }
 
-	// Flag to track if socket binding was successful
-	bool bindSocketSuccess;
+            // After responding to the client, close the connection and reset the socket to allow new connections
+            CloseClientSocket();
+        }
+        else {
+            CloseClientSocket();
+            UE_LOG(LogServer, Log, TEXT("Client disconnected"));
+        }
+    }
+}
 
-	// Function to start the TCP listener
-	bool StartTCPListener();
 
-	// Check for new connections
-	void CheckForConnections();
+bool ATCPServer::StartTCPListener()
+{
+    // Obtain the socket subsystem
+    SocketSubsystem = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
+    if (!SocketSubsystem)
+    {
+        UE_LOG(LogServer, Error, TEXT("Unable to get SocketSubsystem"));
+        return false;
+    }
+    else {
+        UE_LOG(LogServer, Log, TEXT("Got SocketSubsystem"));
+    }
 
-	// Receive data from the client
-	FString ReceiveData();
+    // Create the TCP listener socket
+    ServerSocket = SocketSubsystem->CreateSocket(NAME_Stream, TEXT("TCP Server"), false);
+    if (!ServerSocket)
+    {
+        UE_LOG(LogServer, Error, TEXT("Unable to create TCP Socket"));
+        return false;
+    }
+    else {
+        UE_LOG(LogServer, Log, TEXT("Created TCP Socket"));
+    }
 
-	// Reference to the object manager (prevent garbage collection)
-	UPROPERTY()
-	UObjectManager* ObjectManager;
+    // Set up the server address
+    TSharedRef<FInternetAddr> ServerAddr = SocketSubsystem->CreateInternetAddr();
+    ServerAddr->SetIp(TEXT("192.168.1.192"), bindSocketSuccess);
+    ServerAddr->SetPort(port);
 
-	// Parse the received message and dispatch actions
-	FString ParseAndDispatch(FString& Message);
+    // Bind the socket to the address
+    if (!ServerSocket->Bind(*ServerAddr))
+    {
+        UE_LOG(LogServer, Error, TEXT("Unable to bind socket to address"));
+        return false;
+    }
+    else {
+        UE_LOG(LogServer, Log, TEXT("Socket successfully bound to address"));
+    }
 
-	// Send a response back to the client
-	void SendBackToClient(const FString& Message);
+    // Start listening on the socket
+    if (!ServerSocket->Listen(8))
+    {
+        UE_LOG(LogServer, Error, TEXT("Unable to start listening on socket"));
+        return false;
+    }
+    else {
+        UE_LOG(LogServer, Log, TEXT("Server started listening on port %d"), port);
+    }
+    return true;
+}
 
-	// Close the TCP listener
-	bool CloseTCPListener();
-};
+void ATCPServer::CheckForConnections()
+{
+    bool Pending;
+    if (ServerSocket->HasPendingConnection(Pending) && Pending)
+    {
+        ClientSocket = ServerSocket->Accept(TEXT("Accepted Client Connection"));
+        UE_LOG(LogServer, Log, TEXT("Client connected"));
+    }
+}
+
+FString ATCPServer::ReceiveData()
+{
+    uint32 Size;
+    while (ClientSocket->HasPendingData(Size))
+    {
+        TArray<uint8> ReceivedData;
+        ReceivedData.SetNumUninitialized(FMath::Min(Size, 65507u));
+
+        int32 Read = 0;
+        ClientSocket->Recv(ReceivedData.GetData(), ReceivedData.Num(), Read);
+
+        // Ensure the data is null-terminated
+        ReceivedData.Add(0);
+
+        FString ReceivedString = FString(UTF8_TO_TCHAR(reinterpret_cast<const char*>(ReceivedData.GetData())));
+        UE_LOG(LogServer, Log, TEXT("Received Data: %s"), *ReceivedString);  // Add log here to confirm data reception
+        return ReceivedString;
+    }
+    return FString();
+}
+
+void ATCPServer::SendBackToClient(const FString& Message)
+{
+    if (ClientSocket && ClientSocket->GetConnectionState() == SCS_Connected)
+    {
+        FTCHARToUTF8 Convert(*Message);
+        int32 BytesSent = 0;
+        bool bSuccessful = ClientSocket->Send((uint8*)Convert.Get(), Convert.Length(), BytesSent);
+
+        if (bSuccessful)
+        {
+            UE_LOG(LogServer, Log, TEXT("Sent message to client: %s"), *Message);
+        }
+        else
+        {
+            UE_LOG(LogServer, Error, TEXT("Failed to send message to client"));
+        }
+    }
+    else
+    {
+        UE_LOG(LogServer, Error, TEXT("No client connected or client disconnected"));
+    }
+}
+
+void ATCPServer::CloseClientSocket()
+{
+    if (ClientSocket)
+    {
+        ClientSocket->Close();
+        ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->DestroySocket(ClientSocket);
+        ClientSocket = nullptr;
+        UE_LOG(LogServer, Log, TEXT("Client socket closed and reset"));
+    }
+}
+
+void ATCPServer::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+    Super::EndPlay(EndPlayReason);
+    CloseTCPListener();
+}
+
+bool ATCPServer::CloseTCPListener()
+{
+    if (ServerSocket)
+    {
+        ServerSocket->Close();
+        ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->DestroySocket(ServerSocket);
+        ServerSocket = nullptr;
+    }
+    if (ClientSocket)
+    {
+        ClientSocket->Close();
+        ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->DestroySocket(ClientSocket);
+        ClientSocket = nullptr;
+    }
+
+    UE_LOG(LogServer, Log, TEXT("Sockets cleaned up"));
+    return true;
+}
