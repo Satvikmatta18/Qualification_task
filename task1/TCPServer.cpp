@@ -97,7 +97,7 @@ bool ATCPServer::StartTCPListener()
 
     // Set up the server address
     TSharedRef<FInternetAddr> ServerAddr = SocketSubsystem->CreateInternetAddr();
-    ServerAddr->SetIp(TEXT("192.168.1.192"), bindSocketSuccess);
+    ServerAddr->SetIp(TEXT(""), bindSocketSuccess);
     ServerAddr->SetPort(port);
 
     // Bind the socket to the address
